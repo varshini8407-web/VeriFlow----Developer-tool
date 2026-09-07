@@ -1,0 +1,793 @@
+{
+  "user": {
+    "id": "usr-dev-01",
+    "name": "Alex Mercer",
+    "email": "alex.mercer@veriflow.io",
+    "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80",
+    "role": "Lead Release & Security Architect",
+    "workspaceId": "ws-demo-01",
+    "createdAt": "2026-01-15T08:00:00.000Z"
+  },
+  "workspaces": [
+    {
+      "id": "ws-demo-01",
+      "name": "Demo Workspace (Hackathon Edition)",
+      "slug": "demo-workspace",
+      "isDemo": true,
+      "projectsCount": 3,
+      "createdAt": "2026-01-15T08:00:00.000Z"
+    },
+    {
+      "id": "ws-prod-01",
+      "name": "VeriFlow Enterprise Core",
+      "slug": "veriflow-core",
+      "isDemo": false,
+      "projectsCount": 8,
+      "createdAt": "2026-02-01T10:30:00.000Z"
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj-coupon-demo",
+      "workspaceId": "ws-demo-01",
+      "name": "Coupon Checkout Service",
+      "description": "High-throughput e-commerce checkout discount calculation and promotion verification engine.",
+      "repoUrl": "https://github.com/veriflow-demo/coupon-checkout-service",
+      "mainLanguage": "Python",
+      "defaultBranch": "main",
+      "lastVerificationDate": "2026-09-07T14:20:00.000Z",
+      "lastDecision": "BLOCK",
+      "openIssuesCount": 2,
+      "environment": "Staging-US-East",
+      "rules": [
+        {
+          "id": "rule-1",
+          "name": "Strict Timezone UTC Normalization",
+          "description": "All expiration and timestamp comparisons must use timezone-aware UTC.",
+          "enabled": true,
+          "severity": "critical"
+        },
+        {
+          "id": "rule-2",
+          "name": "Idempotency Protection",
+          "description": "Financial or discount transactions must check prior redemptions.",
+          "enabled": true,
+          "severity": "critical"
+        },
+        {
+          "id": "rule-3",
+          "name": "SQL Injection Taint Barrier",
+          "description": "No unparameterized SQL queries in repository layers.",
+          "enabled": true,
+          "severity": "critical"
+        },
+        {
+          "id": "rule-4",
+          "name": "Zero Blind LLM Trust",
+          "description": "Requires full executable test suite before production tag.",
+          "enabled": true,
+          "severity": "high"
+        }
+      ],
+      "files": [
+        {
+          "path": "services/coupon_service.py",
+          "name": "coupon_service.py",
+          "content": "# services/coupon_service.py\nfrom datetime import datetime, timezone\nimport pytz\nfrom typing import Optional, Dict, Any\n\nclass CouponService:\n    def __init__(self, db_session, config):\n        self.db = db_session\n        self.config = config\n        self.business_tz = pytz.timezone(config.get(\"TIMEZONE\", \"America/New_York\"))\n\n    def validate_and_apply(self, code: str, cart_total: float, user_id: str) -> Dict[str, Any]:\n        \"\"\"\n        Validates a coupon code and calculates discount.\n        Requirement:\n        - Check coupon exists and is active\n        - Must not be expired according to configured business timezone\n        - Cannot be applied twice by the same user\n        \"\"\"\n        coupon = self.db.query(\"SELECT * FROM coupons WHERE code = ?\", (code,)).first()\n        if not coupon:\n            return {\"valid\": False, \"discount\": 0.0, \"reason\": \"Coupon does not exist\"}\n\n        # BUG 1 (Timezone Bug): Using local system time instead of business timezone UTC normalized\n        current_time = datetime.now()  # Flaw: Uses server naive time instead of business_tz aware time\n        \n        if coupon.expires_at and current_time > coupon.expires_at:\n            return {\"valid\": False, \"discount\": 0.0, \"reason\": \"Coupon has expired\"}\n\n        # BUG 2 (Duplicate Application Flaw): Missing idempotency / user prior usage check\n        # Existing usage verification omitted in AI-generated pull request\n\n        discount_amount = (cart_total * coupon.discount_pct) / 100.0\n        return {\n            \"valid\": True,\n            \"code\": code,\n            \"discount\": discount_amount,\n            \"final_total\": max(0.0, cart_total - discount_amount)\n        }\n",
+          "language": "python",
+          "size": 1420
+        },
+        {
+          "path": "controllers/checkout_controller.py",
+          "name": "checkout_controller.py",
+          "content": "from fastapi import APIRouter, Depends, HTTPException\nfrom services.coupon_service import CouponService\nfrom repositories.order_repository import OrderRepository\n\nrouter = APIRouter(prefix=\"/api/v1/checkout\")\n\n@router.post(\"/apply-coupon\")\ndef apply_coupon(payload: dict, coupon_service: CouponService = Depends()):\n    code = payload.get(\"code\")\n    cart_total = payload.get(\"cart_total\", 0.0)\n    user_id = payload.get(\"user_id\")\n    \n    if not code or not user_id:\n        raise HTTPException(status_code=400, detail=\"Missing code or user_id\")\n        \n    result = coupon_service.validate_and_apply(code, cart_total, user_id)\n    if not result[\"valid\"]:\n        raise HTTPException(status_code=422, detail=result[\"reason\"])\n        \n    return result\n",
+          "language": "python",
+          "size": 890
+        },
+        {
+          "path": "repositories/order_repository.py",
+          "name": "order_repository.py",
+          "content": "class OrderRepository:\n    def __init__(self, db_conn):\n        self.db = db_conn\n\n    def record_redemption(self, coupon_id: str, user_id: str, order_id: str):\n        query = \"INSERT INTO coupon_redemptions (coupon_id, user_id, order_id, redeemed_at) VALUES (?, ?, ?, datetime('now'))\"\n        self.db.execute(query, (coupon_id, user_id, order_id))\n",
+          "language": "python",
+          "size": 512
+        },
+        {
+          "path": "tests/test_coupon_service.py",
+          "name": "test_coupon_service.py",
+          "content": "import pytest\nfrom datetime import datetime, timedelta, timezone\nfrom services.coupon_service import CouponService\n\ndef test_apply_valid_coupon(mock_db, mock_config):\n    service = CouponService(mock_db, mock_config)\n    result = service.validate_and_apply(\"SUMMER20\", 100.0, \"user_123\")\n    assert result[\"valid\"] is True\n    assert result[\"discount\"] == 20.0\n    assert result[\"final_total\"] == 80.0\n\ndef test_expired_coupon_rejected_in_business_timezone(mock_db, mock_config):\n    service = CouponService(mock_db, mock_config)\n    # Coupon expired 5 minutes ago in America/New_York\n    result = service.validate_and_apply(\"FLASH50\", 100.0, \"user_123\")\n    assert result[\"valid\"] is False\n    assert \"expired\" in result[\"reason\"].lower()\n\ndef test_duplicate_coupon_application_prevented(mock_db, mock_config):\n    service = CouponService(mock_db, mock_config)\n    # First application works\n    res1 = service.validate_and_apply(\"WELCOME10\", 100.0, \"user_999\")\n    assert res1[\"valid\"] is True\n    # Second application must be rejected\n    res2 = service.validate_and_apply(\"WELCOME10\", 100.0, \"user_999\")\n    assert res2[\"valid\"] is False\n    assert \"already used\" in res2[\"reason\"].lower()\n",
+          "language": "python",
+          "size": 1320
+        }
+      ],
+      "createdAt": "2026-02-10T11:00:00.000Z"
+    },
+    {
+      "id": "proj-auth-gateway",
+      "workspaceId": "ws-demo-01",
+      "name": "Auth & Identity Gateway",
+      "description": "OAuth2 / OpenID Connect single sign-on authentication gateway with biometric MFA.",
+      "repoUrl": "https://github.com/veriflow-demo/auth-gateway",
+      "mainLanguage": "TypeScript",
+      "defaultBranch": "main",
+      "lastVerificationDate": "2026-09-06T18:45:00.000Z",
+      "lastDecision": "SHIP",
+      "openIssuesCount": 0,
+      "environment": "Production-Global",
+      "rules": [
+        {
+          "id": "r-1",
+          "name": "Constant-time String Comparison",
+          "description": "Prevent timing attacks on token comparison.",
+          "enabled": true,
+          "severity": "critical"
+        },
+        {
+          "id": "r-2",
+          "name": "JWT Algorithm Whitelist",
+          "description": "Disallow none or weak algorithms.",
+          "enabled": true,
+          "severity": "critical"
+        }
+      ],
+      "files": [],
+      "createdAt": "2026-01-20T09:00:00.000Z"
+    },
+    {
+      "id": "proj-payment-bridge",
+      "workspaceId": "ws-demo-01",
+      "name": "Payment Gateway Bridge",
+      "description": "Stripe, PayPal, and Adyen multi-processor webhook ingest and ledger reconcile.",
+      "repoUrl": "https://github.com/veriflow-demo/payment-bridge",
+      "mainLanguage": "TypeScript",
+      "defaultBranch": "main",
+      "lastVerificationDate": "2026-09-05T09:12:00.000Z",
+      "lastDecision": "REVIEW",
+      "openIssuesCount": 1,
+      "environment": "Staging-EU-Central",
+      "rules": [
+        {
+          "id": "r-p1",
+          "name": "Webhook Signature Cryptographic Verification",
+          "description": "Check HMAC signatures before payload parse.",
+          "enabled": true,
+          "severity": "critical"
+        }
+      ],
+      "files": [],
+      "createdAt": "2026-02-01T14:00:00.000Z"
+    }
+  ],
+  "verifications": [
+    {
+      "id": "run-vf-001",
+      "projectId": "proj-coupon-demo",
+      "projectName": "Coupon Checkout Service",
+      "changeType": "pr",
+      "changeTarget": "PR #142: feat(coupon)-discount-engine",
+      "requirementText": "Add a coupon feature that allows users to apply a discount code before checkout. The coupon must expire according to the configured timezone and must not be applied twice.",
+      "verificationLevel": "standard",
+      "status": "FAILED",
+      "decision": "BLOCK",
+      "riskScore": 75,
+      "shipConfidence": 32,
+      "durationMs": 4820,
+      "startedAt": "2026-09-07T14:15:38.000Z",
+      "completedAt": "2026-09-07T14:15:42.820Z",
+      "stages": [
+        {
+          "id": 1,
+          "name": "Repository Loaded & Environment Initialized",
+          "description": "Cloned snapshot from commit fb81a9c and prepared sandboxed context.",
+          "status": "passed",
+          "durationMs": 240,
+          "logs": [
+            "[INFO] Resolved repository https://github.com/veriflow-demo/coupon-checkout-service",
+            "[INFO] Sandbox initialized with python 3.13 runtime."
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Requirement Analysis & Criteria Extraction",
+          "description": "Decomposed natural language prompt into 4 verifiable criteria.",
+          "status": "passed",
+          "durationMs": 380,
+          "logs": [
+            "[INFO] AI requirement parser extracted 4 acceptance criteria.",
+            "[INFO] REQ-001, REQ-002, REQ-003, REQ-004 marked as testable."
+          ]
+        },
+        {
+          "id": 3,
+          "name": "AST & Code Parsing",
+          "description": "Parsed 4 source files, 8 functions, 3 classes, and 2 REST endpoints.",
+          "status": "passed",
+          "durationMs": 310,
+          "logs": [
+            "[INFO] Parsed services/coupon_service.py (AST depth: 6)",
+            "[INFO] Identified functions: validate_and_apply, record_redemption."
+          ]
+        },
+        {
+          "id": 4,
+          "name": "Git Diff Analysis",
+          "description": "Identified 1 modified file (+34 lines, -2 lines).",
+          "status": "passed",
+          "durationMs": 190,
+          "logs": [
+            "[DIFF] services/coupon_service.py: modified lines 14-38"
+          ]
+        },
+        {
+          "id": 5,
+          "name": "Dependency & Impact Analysis",
+          "description": "Computed blast radius: 3 downstream modules affected.",
+          "status": "passed",
+          "durationMs": 280,
+          "logs": [
+            "[GRAPH] coupon_service.py -> checkout_controller.py -> order_repository.py -> test_coupon_service.py"
+          ]
+        },
+        {
+          "id": 6,
+          "name": "Deterministic Test Suite Generation",
+          "description": "Generated 6 positive, negative, boundary, and regression tests.",
+          "status": "passed",
+          "durationMs": 410,
+          "logs": [
+            "[GEN] test_apply_valid_coupon (Positive)",
+            "[GEN] test_expired_coupon_rejected_in_business_timezone (Boundary)",
+            "[GEN] test_duplicate_coupon_application_prevented (Security/Concurrency)"
+          ]
+        },
+        {
+          "id": 7,
+          "name": "Static Analysis & Code Quality Checks",
+          "description": "Checked syntax, imports, dead code, and variable scoping.",
+          "status": "passed",
+          "durationMs": 220,
+          "logs": [
+            "[STATIC] Syntax OK. 0 unused variables. 0 invalid imports."
+          ]
+        },
+        {
+          "id": 8,
+          "name": "Security Taint Analysis (Source to Sink)",
+          "description": "Traced user input parameters to database query sinks.",
+          "status": "warning",
+          "durationMs": 450,
+          "findingsCount": 1,
+          "logs": [
+            "[SECURITY] User input `code` parameter traced to DB query. Parameterization verified.",
+            "[SECURITY-WARN] Duplicate usage verification sink is missing. Potential financial arbitrage vector."
+          ]
+        },
+        {
+          "id": 9,
+          "name": "Runtime Sandboxed Test Execution",
+          "description": "Executed 6 automated tests in isolated test harness.",
+          "status": "failed",
+          "durationMs": 1100,
+          "findingsCount": 2,
+          "logs": [
+            "[TEST] test_apply_valid_coupon ... PASSED (12ms)",
+            "[TEST] test_expired_coupon_rejected_in_business_timezone ... FAILED (28ms)",
+            "       AssertionError: assert result[\"valid\"] is False, Got True! Coupon was accepted despite timezone expiration.",
+            "[TEST] test_duplicate_coupon_application_prevented ... FAILED (19ms)",
+            "       AssertionError: Coupon accepted twice for user_999."
+          ]
+        },
+        {
+          "id": 10,
+          "name": "Integration & Database Verification",
+          "description": "Checked schema compatibility with coupon_redemptions table.",
+          "status": "passed",
+          "durationMs": 380,
+          "logs": [
+            "[DB] Database schema checked: coupon_redemptions table exists."
+          ]
+        },
+        {
+          "id": 11,
+          "name": "External API Contract Verification",
+          "description": "Mocked external payment provider schemas.",
+          "status": "passed",
+          "durationMs": 210,
+          "logs": [
+            "[MOCK] External currency and tax APIs verified with contract fixtures."
+          ]
+        },
+        {
+          "id": 12,
+          "name": "Evidence Collection & Matrix Generation",
+          "description": "Gathered 4 verified proof items against requirements.",
+          "status": "passed",
+          "durationMs": 180,
+          "logs": [
+            "[EVIDENCE] Matrix constructed with 2 passed, 2 failed assertions."
+          ]
+        },
+        {
+          "id": 13,
+          "name": "Risk Engine Evaluation & Decision",
+          "description": "Evaluated hard rules and risk factors. Critical test failure detected.",
+          "status": "failed",
+          "durationMs": 190,
+          "logs": [
+            "[RISK] Base score: 0 + 35 (Test Failure) + 40 (Financial Duplication Flaw) = 75",
+            "[DECISION] Final release outcome: BLOCK"
+          ]
+        }
+      ],
+      "requirements": [
+        {
+          "id": "req-1",
+          "verificationRunId": "run-vf-001",
+          "code": "REQ-001",
+          "description": "User can apply a valid coupon to get calculated discount",
+          "priority": "high",
+          "testable": true,
+          "status": "passed",
+          "relatedFiles": [
+            "services/coupon_service.py",
+            "controllers/checkout_controller.py"
+          ],
+          "relatedTests": [
+            "test_apply_valid_coupon"
+          ],
+          "evidenceSummary": "Automated test `test_apply_valid_coupon` passed with 100% assertion match."
+        },
+        {
+          "id": "req-002",
+          "verificationRunId": "run-vf-001",
+          "code": "REQ-002",
+          "description": "Expired coupons must be rejected according to configured business timezone",
+          "priority": "critical",
+          "testable": true,
+          "status": "failed",
+          "relatedFiles": [
+            "services/coupon_service.py"
+          ],
+          "relatedTests": [
+            "test_expired_coupon_rejected_in_business_timezone"
+          ],
+          "evidenceSummary": "Failed boundary test: Naive server datetime.now() was used instead of timezone-aware UTC comparison."
+        },
+        {
+          "id": "req-003",
+          "verificationRunId": "run-vf-001",
+          "code": "REQ-003",
+          "description": "A coupon cannot be applied more than once by the same user",
+          "priority": "critical",
+          "testable": true,
+          "status": "failed",
+          "relatedFiles": [
+            "services/coupon_service.py",
+            "repositories/order_repository.py"
+          ],
+          "relatedTests": [
+            "test_duplicate_coupon_application_prevented"
+          ],
+          "evidenceSummary": "Failed integration test: Missing redemption lookup query in `validate_and_apply`."
+        },
+        {
+          "id": "req-004",
+          "verificationRunId": "run-vf-001",
+          "code": "REQ-004",
+          "description": "Non-existent coupon codes return proper 422 error and zero discount",
+          "priority": "medium",
+          "testable": true,
+          "status": "passed",
+          "relatedFiles": [
+            "services/coupon_service.py"
+          ],
+          "relatedTests": [
+            "test_invalid_coupon_rejected"
+          ],
+          "evidenceSummary": "Passed static query assertion and input null check."
+        }
+      ],
+      "testCases": [
+        {
+          "id": "tc-01",
+          "verificationRunId": "run-vf-001",
+          "name": "test_apply_valid_coupon",
+          "category": "positive",
+          "description": "Ensures 20% discount applies correctly on $100 cart.",
+          "file": "tests/test_coupon_service.py",
+          "code": "def test_apply_valid_coupon(): ...",
+          "status": "passed",
+          "durationMs": 12
+        },
+        {
+          "id": "tc-02",
+          "verificationRunId": "run-vf-001",
+          "name": "test_expired_coupon_rejected_in_business_timezone",
+          "category": "boundary",
+          "description": "Validates coupon expiration under configured America/New_York timezone boundary.",
+          "file": "tests/test_coupon_service.py",
+          "code": "def test_expired_coupon_rejected_in_business_timezone(): ...",
+          "status": "failed",
+          "durationMs": 28,
+          "errorMessage": "AssertionError: assert result[\"valid\"] is False, Got True!",
+          "stackTrace": "Traceback (most recent call last):\n  File \"tests/test_coupon_service.py\", line 18, in test_expired_coupon_rejected_in_business_timezone\n    assert result[\"valid\"] is False\nAssertionError: Coupon was accepted after expiration time due to naive server clock comparison."
+        },
+        {
+          "id": "tc-03",
+          "verificationRunId": "run-vf-001",
+          "name": "test_duplicate_coupon_application_prevented",
+          "category": "security",
+          "description": "Checks idempotency so a single customer cannot redeem same promo code multiple times.",
+          "file": "tests/test_coupon_service.py",
+          "code": "def test_duplicate_coupon_application_prevented(): ...",
+          "status": "failed",
+          "durationMs": 19,
+          "errorMessage": "AssertionError: Second redemption succeeded when it should fail.",
+          "stackTrace": "Traceback (most recent call last):\n  File \"tests/test_coupon_service.py\", line 26, in test_duplicate_coupon_application_prevented\n    assert res2[\"valid\"] is False\nAssertionError: validate_and_apply did not query previous coupon_redemptions records."
+        },
+        {
+          "id": "tc-04",
+          "verificationRunId": "run-vf-001",
+          "name": "test_invalid_coupon_rejected",
+          "category": "negative",
+          "description": "Verifies unknown code returns valid=False without throwing unexpected exceptions.",
+          "file": "tests/test_coupon_service.py",
+          "code": "def test_invalid_coupon_rejected(): ...",
+          "status": "passed",
+          "durationMs": 8
+        }
+      ],
+      "issues": [
+        {
+          "id": "iss-01",
+          "projectId": "proj-coupon-demo",
+          "verificationRunId": "run-vf-001",
+          "title": "Timezone Mismatch in Coupon Expiration Logic",
+          "severity": "critical",
+          "category": "timezone_bug",
+          "file": "services/coupon_service.py",
+          "lineNumber": 24,
+          "explanation": "The coupon expiration check uses naive server datetime.now() instead of normalizing both current time and expiration time to UTC under the configured business timezone.",
+          "evidence": "test_expired_coupon_rejected_in_business_timezone failed during runtime execution.",
+          "suggestedFix": "Convert the expiration timestamp to UTC using the configured timezone and compare against datetime.now(timezone.utc).",
+          "patchDiff": "@@ -23,3 +23,4 @@\n-        current_time = datetime.now()\n-        if coupon.expires_at and current_time > coupon.expires_at:\n+        now_utc = datetime.now(timezone.utc)\n+        coupon_expires_utc = coupon.expires_at.replace(tzinfo=self.business_tz).astimezone(timezone.utc)\n+        if coupon_expires_utc and now_utc > coupon_expires_utc:",
+          "status": "open",
+          "createdAt": "2026-09-07T14:15:42.000Z"
+        },
+        {
+          "id": "iss-02",
+          "projectId": "proj-coupon-demo",
+          "verificationRunId": "run-vf-001",
+          "title": "Missing Idempotency / Duplicate Coupon Redemption Check",
+          "severity": "critical",
+          "category": "logic_error",
+          "file": "services/coupon_service.py",
+          "lineNumber": 28,
+          "explanation": "The validate_and_apply method does not verify if the customer has already redeemed this coupon in prior orders, creating a financial vulnerability.",
+          "evidence": "test_duplicate_coupon_application_prevented failed during integration test execution.",
+          "suggestedFix": "Query coupon_redemptions table for (coupon_id, user_id) before returning valid=True.",
+          "patchDiff": "@@ -28,2 +28,6 @@\n+        usage_count = self.db.query(\"SELECT count(*) as count FROM coupon_redemptions WHERE coupon_id = ? AND user_id = ?\", (coupon.id, user_id)).scalar()\n+        if usage_count and usage_count > 0:\n+            return {\"valid\": False, \"discount\": 0.0, \"reason\": \"Coupon already used by this customer\"}",
+          "status": "open",
+          "createdAt": "2026-09-07T14:15:42.000Z"
+        }
+      ],
+      "evidence": [
+        {
+          "id": "ev-01",
+          "verificationRunId": "run-vf-001",
+          "requirementCode": "REQ-001",
+          "requirementTitle": "Valid coupon calculated discount",
+          "evidenceType": "Automated Test",
+          "evidenceSource": "tests/test_coupon_service.py::test_apply_valid_coupon",
+          "result": "Passed",
+          "timestamp": "2026-09-07T14:15:40.000Z",
+          "details": "Discount math verified for 20% on $100 cart yielding $80 final total."
+        },
+        {
+          "id": "ev-02",
+          "verificationRunId": "run-vf-001",
+          "requirementCode": "REQ-002",
+          "requirementTitle": "Business timezone expiration enforcement",
+          "evidenceType": "Boundary Test",
+          "evidenceSource": "tests/test_coupon_service.py::test_expired_coupon_rejected_in_business_timezone",
+          "result": "Failed",
+          "timestamp": "2026-09-07T14:15:41.000Z",
+          "details": "Failed: Server naive clock comparison allowed an expired promotion code to pass."
+        },
+        {
+          "id": "ev-03",
+          "verificationRunId": "run-vf-001",
+          "requirementCode": "REQ-003",
+          "requirementTitle": "Single coupon usage per customer",
+          "evidenceType": "Integration Contract",
+          "evidenceSource": "tests/test_coupon_service.py::test_duplicate_coupon_application_prevented",
+          "result": "Failed",
+          "timestamp": "2026-09-07T14:15:41.500Z",
+          "details": "Failed: Duplicate coupon redemption was not intercepted."
+        },
+        {
+          "id": "ev-04",
+          "verificationRunId": "run-vf-001",
+          "requirementCode": "REQ-004",
+          "requirementTitle": "No SQL injection vulnerability in coupon lookup",
+          "evidenceType": "Security Taint Scan",
+          "evidenceSource": "services/coupon_service.py::validate_and_apply",
+          "result": "Passed",
+          "timestamp": "2026-09-07T14:15:40.800Z",
+          "details": "Query parameters use sanitized tuple bindings."
+        }
+      ],
+      "dependencyGraph": {
+        "nodes": [
+          {
+            "id": "n1",
+            "name": "validate_and_apply()",
+            "type": "function",
+            "path": "services/coupon_service.py",
+            "risk": "critical",
+            "changed": true,
+            "details": "Changed in PR #142 (+34 lines)"
+          },
+          {
+            "id": "n2",
+            "name": "CouponService",
+            "type": "service",
+            "path": "services/coupon_service.py",
+            "risk": "high",
+            "changed": true,
+            "details": "Core discount business service"
+          },
+          {
+            "id": "n3",
+            "name": "POST /api/v1/checkout/apply-coupon",
+            "type": "endpoint",
+            "path": "controllers/checkout_controller.py",
+            "risk": "medium",
+            "changed": false,
+            "details": "Public REST API endpoint"
+          },
+          {
+            "id": "n4",
+            "name": "OrderRepository",
+            "type": "database",
+            "path": "repositories/order_repository.py",
+            "risk": "medium",
+            "changed": false,
+            "details": "coupon_redemptions table store"
+          },
+          {
+            "id": "n5",
+            "name": "test_coupon_service.py",
+            "type": "test",
+            "path": "tests/test_coupon_service.py",
+            "risk": "critical",
+            "changed": false,
+            "details": "Test suite (2 failing assertions)"
+          }
+        ],
+        "edges": [
+          {
+            "source": "n1",
+            "target": "n2",
+            "label": "member_of",
+            "type": "calls"
+          },
+          {
+            "source": "n3",
+            "target": "n2",
+            "label": "depends_on",
+            "type": "calls"
+          },
+          {
+            "source": "n2",
+            "target": "n4",
+            "label": "queries",
+            "type": "queries"
+          },
+          {
+            "source": "n5",
+            "target": "n1",
+            "label": "verifies",
+            "type": "tests"
+          }
+        ],
+        "affectedSummary": [
+          "services/coupon_service.py (Direct Modification)",
+          "controllers/checkout_controller.py (Caller Endpoint)",
+          "repositories/order_repository.py (Downstream Data Layer)",
+          "tests/test_coupon_service.py (Verification Suite)"
+        ]
+      },
+      "stats": {
+        "requirementsTotal": 4,
+        "requirementsVerified": 2,
+        "testsTotal": 4,
+        "testsPassed": 2,
+        "testsFailed": 2,
+        "securityFindings": 1,
+        "filesChanged": 1,
+        "affectedModules": 3
+      },
+      "aiExplanation": {
+        "summary": "Verification detected 2 critical defects in the AI-generated coupon logic.",
+        "rootCause": "1. Naive system clock was compared against business timezone without UTC normalization.\n2. Idempotency redemption check was omitted, allowing repeat coupon usage.",
+        "impact": "Expired coupons can be exploited by users in different timezones, and single-use promo codes can be reused indefinitely.",
+        "affectedFiles": [
+          "services/coupon_service.py"
+        ],
+        "suggestedFix": "Normalize datetime checks with timezone.utc and query coupon_redemptions table before returning discount.",
+        "isSafeToDeploy": false,
+        "repairAttempts": 0
+      }
+    }
+  ],
+  "issues": [
+    {
+      "id": "iss-01",
+      "projectId": "proj-coupon-demo",
+      "verificationRunId": "run-vf-001",
+      "title": "Timezone Mismatch in Coupon Expiration Logic",
+      "severity": "critical",
+      "category": "timezone_bug",
+      "file": "services/coupon_service.py",
+      "lineNumber": 24,
+      "explanation": "The coupon expiration check uses naive server datetime.now() instead of normalizing both current time and expiration time to UTC under the configured business timezone.",
+      "evidence": "test_expired_coupon_rejected_in_business_timezone failed during runtime execution.",
+      "suggestedFix": "Convert the expiration timestamp to UTC using the configured timezone and compare against datetime.now(timezone.utc).",
+      "patchDiff": "@@ -23,3 +23,4 @@\n-        current_time = datetime.now()\n-        if coupon.expires_at and current_time > coupon.expires_at:\n+        now_utc = datetime.now(timezone.utc)\n+        coupon_expires_utc = coupon.expires_at.replace(tzinfo=self.business_tz).astimezone(timezone.utc)\n+        if coupon_expires_utc and now_utc > coupon_expires_utc:",
+      "status": "open",
+      "createdAt": "2026-09-07T14:15:42.000Z"
+    },
+    {
+      "id": "iss-02",
+      "projectId": "proj-coupon-demo",
+      "verificationRunId": "run-vf-001",
+      "title": "Missing Idempotency / Duplicate Coupon Redemption Check",
+      "severity": "critical",
+      "category": "logic_error",
+      "file": "services/coupon_service.py",
+      "lineNumber": 28,
+      "explanation": "The validate_and_apply method does not verify if the customer has already redeemed this coupon in prior orders, creating a financial vulnerability.",
+      "evidence": "test_duplicate_coupon_application_prevented failed during integration test execution.",
+      "suggestedFix": "Query coupon_redemptions table for (coupon_id, user_id) before returning valid=True.",
+      "patchDiff": "@@ -28,2 +28,6 @@\n+        usage_count = self.db.query(\"SELECT count(*) as count FROM coupon_redemptions WHERE coupon_id = ? AND user_id = ?\", (coupon.id, user_id)).scalar()\n+        if usage_count and usage_count > 0:\n+            return {\"valid\": False, \"discount\": 0.0, \"reason\": \"Coupon already used by this customer\"}",
+      "status": "open",
+      "createdAt": "2026-09-07T14:15:42.000Z"
+    }
+  ],
+  "pullRequests": [
+    {
+      "id": "pr-142",
+      "projectId": "proj-coupon-demo",
+      "number": 142,
+      "title": "feat(coupon): add promotional discount checkout engine",
+      "branch": "feat/coupon-engine",
+      "targetBranch": "main",
+      "author": {
+        "name": "Copilot / AI Assistant",
+        "avatar": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=120&auto=format&fit=crop&q=80"
+      },
+      "status": "open",
+      "verificationDecision": "BLOCK",
+      "riskScore": 75,
+      "changedFiles": [
+        "services/coupon_service.py",
+        "controllers/checkout_controller.py"
+      ],
+      "reviewers": [
+        "Alex Mercer (Security Lead)",
+        "VeriFlow Bot"
+      ],
+      "reportMarkdown": "## 🛑 VeriFlow Release Verification Report\n\n**Decision:** `BLOCK` (Risk Score: **75 / 100**)\n**Ship Confidence:** 32%\n\n### 📋 Requirement Coverage\n- **2 of 4** requirements verified (50%)\n- ❌ `REQ-002` Timezone Expiration: FAILED\n- ❌ `REQ-003` Duplicate Prevention: FAILED\n\n### 🧪 Test Results\n- **2 passed**, **2 failed** (Total: 4 tests)\n- Failed: `test_expired_coupon_rejected_in_business_timezone`\n- Failed: `test_duplicate_coupon_application_prevented`\n\n### 🛡️ Security & Impact\n- Blast radius: 3 downstream services impacted\n- Potential vulnerability: Financial promotion replay\n\n**Recommended Action:** Apply the suggested timezone UTC fix and redemption query, then rerun verification.",
+      "createdAt": "2026-09-07T14:10:00.000Z"
+    },
+    {
+      "id": "pr-139",
+      "projectId": "proj-auth-gateway",
+      "number": 139,
+      "title": "fix(crypto): enforce constant-time token comparison",
+      "branch": "fix/timing-attack-patch",
+      "targetBranch": "main",
+      "author": {
+        "name": "Alex Mercer",
+        "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80"
+      },
+      "status": "merged",
+      "verificationDecision": "SHIP",
+      "riskScore": 0,
+      "changedFiles": [
+        "src/crypto/token.ts",
+        "tests/crypto.test.ts"
+      ],
+      "reviewers": [
+        "DevSecOps Team"
+      ],
+      "reportMarkdown": "## ✅ VeriFlow Release Verification Report\n\n**Decision:** `SHIP` (Risk Score: **0 / 100**)\n**Ship Confidence:** 99%\n\nAll 8 automated tests and cryptographic taint rules passed. Proof-of-Ship generated: `VF-CERT-2026-88129`.",
+      "proofOfShipId": "pos-auth-01",
+      "createdAt": "2026-09-06T18:30:00.000Z"
+    }
+  ],
+  "proofOfShip": [
+    {
+      "id": "pos-auth-01",
+      "verificationRunId": "run-auth-passed-01",
+      "projectId": "proj-auth-gateway",
+      "projectName": "Auth & Identity Gateway",
+      "commitHash": "7c9e18b839f1c7d24a5690b11e82845c43d2891a",
+      "requirementSummary": "Enforce constant-time timing safe byte comparison for HMAC authorization tokens.",
+      "timestamp": "2026-09-06T18:45:00.000Z",
+      "decision": "SHIP",
+      "riskScore": 0,
+      "shipConfidence": 99,
+      "testsPassed": 14,
+      "testsTotal": 14,
+      "securityStatus": "CLEAN",
+      "requirementCoverage": 100,
+      "environment": "Production-Global",
+      "certificateId": "VF-CERT-2026-88129",
+      "verificationHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "qrCodeUrl": "https://veriflow.io/verify/VF-CERT-2026-88129",
+      "approvals": [
+        {
+          "approverName": "Alex Mercer",
+          "role": "Lead Security Architect",
+          "approvedAt": "2026-09-06T18:46:12.000Z",
+          "decision": "APPROVED",
+          "comment": "Timing-safe crypto validated via 10,000 synthetic micro-benchmarks.",
+          "channel": "DEVICE_BRIDGE"
+        }
+      ],
+      "disclaimer": "This certificate represents the deterministic checks executed by VeriFlow for the specified version. It does not guarantee that the software is completely defect-free."
+    }
+  ],
+  "notifications": [
+    {
+      "id": "notif-1",
+      "title": "Verification Run BLOCKED",
+      "message": "Coupon Checkout Service (PR #142) was blocked due to 2 failed tests and timezone risk.",
+      "type": "error",
+      "read": false,
+      "createdAt": "2026-09-07T14:15:43.000Z",
+      "link": "/verifications/run-vf-001"
+    },
+    {
+      "id": "notif-2",
+      "title": "Proof-of-Ship Generated",
+      "message": "Auth & Identity Gateway commit 7c9e18b received 100% SHIP certificate.",
+      "type": "success",
+      "read": true,
+      "createdAt": "2026-09-06T18:45:10.000Z",
+      "link": "/proof-of-ship/pos-auth-01"
+    }
+  ],
+  "auditLogs": [
+    {
+      "id": "audit-1",
+      "actor": "Alex Mercer (Lead Architect)",
+      "action": "VERIFICATION_EXECUTED",
+      "target": "Coupon Checkout Service (PR #142)",
+      "details": "Initiated Standard Check pipeline. Decision: BLOCK (Risk: 75)",
+      "ip": "192.168.1.104",
+      "timestamp": "2026-09-07T14:15:38.000Z"
+    },
+    {
+      "id": "audit-2",
+      "actor": "Alex Mercer (Lead Architect)",
+      "action": "PROOF_OF_SHIP_APPROVED",
+      "target": "Auth & Identity Gateway (VF-CERT-2026-88129)",
+      "details": "Approved via Phone Device Bridge (Biometric Voice & FaceID)",
+      "ip": "10.0.4.12",
+      "timestamp": "2026-09-06T18:46:12.000Z"
+    }
+  ],
+  "officeKit": {
+    "device": "office-kit-desk-01",
+    "state": "BLOCKED",
+    "projectId": "proj-coupon-demo",
+    "projectName": "Coupon Checkout Service",
+    "verificationRunId": "run-vf-001",
+    "reason": "Manually simulated from desk console",
+    "stageName": "Risk Engine Evaluation",
+    "updatedAt": "2026-09-07T14:24:03.110Z"
+  },
+  "deviceSessions": []
+}
