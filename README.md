@@ -368,38 +368,7 @@ cd server
 npm.cmd run dev
 ```
 
-Open your browser at:
-👉 **[http://localhost:5000](http://localhost:5000)**
 
----
-
-### ⚡ Option 2: Run in Development Mode (Dual Terminals with Live Hot-Reload)
-
-#### 🖥️ Terminal 1 (Backend Server on Port 5000):
-```powershell
-cd "c:\Users\varsh\DEVELOPER TOOL (IQOO)\server"
-npm.cmd run dev
-```
-
-#### 💻 Terminal 2 (Frontend Client on Port 5173):
-```powershell
-cd "c:\Users\varsh\DEVELOPER TOOL (IQOO)\client"
-npm.cmd run dev
-```
-
-Open your browser at:
-👉 **[http://localhost:5173](http://localhost:5173)**
-
----
-
-### 🧪 Option 3: Run the 14-Step Automated E2E Test Suite
-
-To verify the entire 13-stage pipeline, risk engine, Proof-of-Ship minting, and voice command dispatch via automated script:
-
-```powershell
-cd "c:\Users\varsh\DEVELOPER TOOL (IQOO)"
-node test_e2e.js
-```
 
 ---
 
